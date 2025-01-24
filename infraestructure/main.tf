@@ -12,6 +12,7 @@ provider "aws" {
   region = var.aws_region
 }
 
+
 # Create the VPC
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
@@ -28,11 +29,12 @@ resource "aws_subnet" "public" {
   count       = length(var.public_subnet_cidr_blocks)
   vpc_id      = aws_vpc.main.id
   cidr_block  = element(var.public_subnet_cidr_blocks, count.index)
-  availability_zone = "us-east-1a" # Replace with your desired AZ
+  availability_zone = element(var.availability_zones, count.index)
   map_public_ip_on_launch = true 
 
   tags = {
     Name = "public-subnet-${count.index + 1}"
+    "kubernetes.io/role/elb" = 1
   }
 }
 
@@ -41,13 +43,14 @@ resource "aws_subnet" "private" {
   count       = length(var.private_subnet_cidr_blocks)
   vpc_id      = aws_vpc.main.id
   cidr_block  = element(var.private_subnet_cidr_blocks, count.index)
-  availability_zone = "us-east-1a" # Replace with your desired AZ
+  availability_zone = element(var.availability_zones, count.index)
+ # availability_zone = "us-east-1a" # Replace with your desired AZ
 
   tags = {
     Name = "private-subnet-${count.index + 1}"
+    "kubernetes.io/role/internal-elb" = 1
   }
 }
-
 
 ## Internet Gateway
 resource "aws_internet_gateway" "main" {
@@ -69,11 +72,13 @@ resource "aws_route_table" "public" {
   }
 }
 
+# Create a separate route table for each private subnet
 resource "aws_route_table" "private" {
+  count  = 2
   vpc_id = aws_vpc.main.id
 
   tags = {
-    Name = "private-route-table"
+    Name = "private-rt-${count.index + 1}"
   }
 }
 
@@ -83,42 +88,52 @@ resource "aws_route" "public_route" {
   gateway_id     = aws_internet_gateway.main.id
 }
 
-# Associate subnets with route tables
+# Associate public subnets with public route table
 resource "aws_route_table_association" "public" {
-  subnet_id      = aws_subnet.public[0].id
+  count          = length(aws_subnet.public)
+  subnet_id      = aws_subnet.public[count.index].id
   route_table_id = aws_route_table.public.id
 }
 
+# Associate public subnets with private route table
 resource "aws_route_table_association" "private" {
-  subnet_id      = aws_subnet.private[0].id
-  route_table_id = aws_route_table.private.id
+  count          = length(aws_subnet.private)
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private[count.index].id
 }
 
 # NAT Gateway
 # ------------------------------------
 
-# Create a NAT Gateway
+# Create NAT Gateways (one per AZ)
 resource "aws_nat_gateway" "main" {
-  allocation_id = aws_eip.nat.id
-  subnet_id     = aws_subnet.private[0].id # Choose one of your private subnets
+  count         = 2  # Create 2 NAT Gateways
+  allocation_id = aws_eip.nat[count.index].id
+  subnet_id     = aws_subnet.public[count.index].id  # Place NAT Gateway in public subnets
 
   tags = {
-    Name = "acme-gateway"
+    Name = "acme-gateway-${count.index + 1}"
   }
+
+  # Add dependency to ensure the Internet Gateway is created first
+  depends_on = [aws_internet_gateway.main]
 }
 
-# Create an Elastic IP for the NAT Gateway
+# Create Elastic IPs for the NAT Gateways
 resource "aws_eip" "nat" {
+  count = 2  # Create 2 EIPs
+
   tags = {
-    Name = "nat-eip"
+    Name = "nat-eip-${count.index + 1}"
   }
 }
 
 # Create a route for private subnets to use the NAT Gateway
 resource "aws_route" "private_route" {
-  route_table_id             = aws_route_table.private.id
-  destination_cidr_block = "0.0.0.0/0" 
-  nat_gateway_id             = aws_nat_gateway.main.id
+  count                  = 2
+  route_table_id         = aws_route_table.private[count.index].id
+  destination_cidr_block = "0.0.0.0/0"
+  nat_gateway_id         = aws_nat_gateway.main[count.index].id
 }
 
 #### Security Groups and  ACLs
@@ -236,3 +251,37 @@ output "instance_public_ip" {
   value = aws_instance.example.public_ip 
 }
 
+## EKS 
+## ------
+# Create the EKS Cluster
+module "eks" {
+  source          = "terraform-aws-modules/eks/aws"
+  cluster_name    = "acme-eks-cluster"
+  cluster_version = "1.28"
+
+  # VPC configuration
+  vpc_id = aws_vpc.main.id
+  subnet_ids = aws_subnet.private[*].id
+
+    eks_managed_node_groups = {
+        one = {
+            name = "node-group-1"
+
+            instance_types = ["t3.micro"]
+
+            min_size     = 1
+            max_size     = 3
+            desired_size = 2
+        }
+
+        two = {
+            name = "node-group-2"
+
+            instance_types = ["t3.micro"]
+
+            min_size     = 1
+            max_size     = 2
+            desired_size = 1
+        }
+    }
+}

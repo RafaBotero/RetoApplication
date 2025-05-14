@@ -2,14 +2,21 @@ package com.acmeclub.accountservice;
 
 public class AcmeClubAccount {
 
+    
+    private int id;
     private String name;
     private String email;
     private int pointsBalance;
 
-    public AcmeClubAccount(String name, String email, int pointsBalance) {
+    public AcmeClubAccount(int id, String name, String email, int pointsBalance) {
+        this.id = id;
         this.name = name;
         this.email = email;
         this.pointsBalance = pointsBalance; 
+    }
+
+    public int getId() {
+        return id;
     }
 
     public String getName() {
